@@ -167,6 +167,7 @@ class BaseValidator:
         self.init_metrics(de_parallel(model))
         self.jdict = []  # empty before each val
         for batch_i, batch in enumerate(bar):
+            
             self.run_callbacks("on_val_batch_start")
             self.batch_i = batch_i
             # Preprocess
@@ -184,6 +185,8 @@ class BaseValidator:
 
             # Postprocess
             with dt[3]:
+                # while True:
+                    # print(preds.shape)
                 preds = self.postprocess(preds)
 
             self.update_metrics(preds, batch)

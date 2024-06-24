@@ -97,6 +97,8 @@ class PoseValidator(DetectionValidator):
 
     def _prepare_pred(self, pred, pbatch):
         """Prepares and scales keypoints in a batch for pose processing."""
+        # while True:
+            # print(pred.shape)
         predn = super()._prepare_pred(pred, pbatch)
         nk = pbatch["kpts"].shape[1]
         pred_kpts = predn[:, 6:].view(len(predn), nk, -1)
@@ -105,6 +107,8 @@ class PoseValidator(DetectionValidator):
 
     def update_metrics(self, preds, batch):
         """Metrics."""
+        # while True:
+            # print(preds[0].shape)
         for si, pred in enumerate(preds):
             self.seen += 1
             npr = len(pred)

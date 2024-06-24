@@ -213,7 +213,7 @@ def non_max_suppression(
     if isinstance(prediction, (list, tuple)):  # YOLOv8 model in validation model, output = (inference_out, loss_out)
         prediction = prediction[0]  # select only inference output
 
-    if prediction.shape[-1] == 6:  # end-to-end model
+    if prediction.shape[-2] == max_det:  # end-to-end model
         return [pred[pred[:, 4] > conf_thres] for pred in prediction]
 
     bs = prediction.shape[0]  # batch size

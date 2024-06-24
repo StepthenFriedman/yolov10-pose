@@ -15,7 +15,7 @@ from .conv import Conv
 from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
 from .utils import bias_init_with_prob, linear_init
 
-__all__ = "Detect", "Segment", "Pose", "Classify", "OBB", "RTDETRDecoder", "v10Detect"
+__all__ = "Detect", "Segment", "Pose", "Classify", "OBB", "RTDETRDecoder", "v10Detect", "v10Pose"
 
 
 class Detect(nn.Module):
@@ -25,6 +25,7 @@ class Detect(nn.Module):
     export = False  # export mode
     end2end = False  # end2end
     max_det = 300  # max_det
+    pose = False  # pose
     shape = None
     anchors = torch.empty(0)  # init
     strides = torch.empty(0)  # init
@@ -81,7 +82,8 @@ class Detect(nn.Module):
             return {"one2many": x, "one2one": one2one}
 
         y = self._inference(one2one)
-        y = self.postprocess(y.permute(0, 2, 1), self.max_det, self.nc)
+        if not self.pose:
+            y = self.postprocess(y.permute(0, 2, 1), self.max_det, self.nc)
         return y if self.export else (y, {"one2many": x, "one2one": one2one})
 
     def _inference(self, x):
@@ -597,3 +599,129 @@ class v10Detect(Detect):
             for x in ch
         )
         self.one2one_cv3 = copy.deepcopy(self.cv3)
+
+
+class v10Pose(Detect):
+    end2end = True
+    pose = True
+    max_det = 300
+    
+    def __init__(self, nc=80, kpt_shape=(17, 3), ch=()):
+        """Initialize YOLO network with default parameters and Convolutional Layers."""
+        super().__init__(nc, ch)
+        self.kpt_shape = kpt_shape  # number of keypoints, number of dims (2 for x,y or 3 for x,y,visible)
+        self.nk = kpt_shape[0] * kpt_shape[1]  # number of keypoints total
+        
+        c3 = max(ch[0], min(self.nc, 100))
+        self.cv3 = nn.ModuleList(
+            nn.Sequential(
+                nn.Sequential(Conv(x, x, 3, g=x), Conv(x, c3, 1)),
+                nn.Sequential(Conv(c3, c3, 3, g=c3), Conv(c3, c3, 1)),
+                nn.Conv2d(c3, self.nc, 1),
+            )
+            for x in ch
+        )
+        self.one2one_cv3 = copy.deepcopy(self.cv3)
+
+        c4 = max(ch[0] // 4, self.nk)
+        self.cv4 = nn.ModuleList(nn.Sequential(Conv(x, c4, 3), Conv(c4, c4, 3), nn.Conv2d(c4, self.nk, 1)) for x in ch)
+
+    def forward(self, x):
+        """Perform forward pass through YOLO model and return predictions."""
+        bs = x[0].shape[0]  # batch size
+        kpt = torch.cat([self.cv4[i](x[i]).view(bs, self.nk, -1) for i in range(self.nl)], -1)  # (bs, 17*3, h*w)
+        
+        x = Detect.forward(self, x)
+        if self.training:
+            x["one2one"] = x["one2one"], kpt
+            x["one2many"] = x["one2many"], kpt     
+            return x              
+        
+        pred_kpt = self.kpts_decode(bs, kpt) # 1, 51, 8400
+        
+        if self.export:
+            return  self.postprocess(x.permute(0,2,1), pred_kpt.permute(0,2,1), max_det=self.max_det, nc=self.nc, kpt_shape=self.kpt_shape)
+        else:
+            y = x[0] # 1, 300, 6
+            y = self.postprocess(y.permute(0,2,1), pred_kpt.permute(0,2,1), max_det=self.max_det, nc=self.nc, kpt_shape=self.kpt_shape)
+            one2one = x[1]["one2one"]
+            one2many = x[1]["one2many"]
+            one2one = (one2one, pred_kpt)
+            one2many = (one2many, pred_kpt)
+            return y, {"one2one": one2one, "one2many": one2many}
+                
+    # def forward(self, x):
+    #     """Perform forward pass through YOLO model and return predictions."""
+    #     bs = x[0].shape[0]  # batch size
+    #     kpt = torch.cat([self.cv4[i](x[i]).view(bs, self.nk, -1) for i in range(self.nl)], -1)  # (bs, 17*3, h*w)
+    #     x = Detect.forward(self, x)
+    #     if self.training:
+    #         return x, kpt
+    #     pred_kpt = self.kpts_decode(bs, kpt)
+        # return torch.cat([x, pred_kpt], 1) if self.export else (torch.cat([x[0], pred_kpt], 1), (x[1], kpt))
+
+    def kpts_decode(self, bs, kpts):
+        """Decodes keypoints."""
+        ndim = self.kpt_shape[1]
+        if self.export:  # required for TFLite export to avoid 'PLACEHOLDER_FOR_GREATER_OP_CODES' bug
+            y = kpts.view(bs, *self.kpt_shape, -1)
+            a = (y[:, :, :2] * 2.0 + (self.anchors - 0.5)) * self.strides
+            if ndim == 3:
+                a = torch.cat((a, y[:, :, 2:3].sigmoid()), 2)
+            return a.view(bs, self.nk, -1)
+        else:
+            y = kpts.clone()
+            if ndim == 3:
+                y[:, 2::3] = y[:, 2::3].sigmoid()  # sigmoid (WARNING: inplace .sigmoid_() Apple MPS bug)
+            y[:, 0::ndim] = (y[:, 0::ndim] * 2.0 + (self.anchors[0] - 0.5)) * self.strides
+            y[:, 1::ndim] = (y[:, 1::ndim] * 2.0 + (self.anchors[1] - 0.5)) * self.strides
+            return y
+        
+    @staticmethod
+    def postprocess(detect_preds: torch.Tensor, kpt_preds: torch.Tensor, max_det: int, nc: int = 18, kpt_shape: tuple = (17, 3)):
+        """
+        Post-processes the keypoint predictions obtained from a YOLOv10 model.
+
+        Args:
+            preds (torch.Tensor): The predictions obtained from the model. It should have a shape of (batch_size, num_boxes, kpt_shape[0] * kpt_shape[1]).
+            max_det (int): The maximum number of detections to keep.
+            nc (int, optional): The number of classes. Defaults to 80.
+
+        """
+        assert kpt_shape[0] * kpt_shape[1] == kpt_preds.shape[-1]
+        assert 4 + nc == detect_preds.shape[-1]
+        boxes, scores = detect_preds.split([4, nc], dim=-1)
+        
+        max_scores = scores.amax(dim=-1)
+        max_scores, index = torch.topk(max_scores, min(max_det, max_scores.shape[1]), axis=-1)
+        index = index.unsqueeze(-1)
+        boxes = torch.gather(boxes, dim=1, index=index.repeat(1, 1, boxes.shape[-1]))
+        scores = torch.gather(scores, dim=1, index=index.repeat(1, 1, scores.shape[-1]))
+        kpts = torch.gather(kpt_preds, dim=1, index=index.repeat(1, 1, kpt_preds.shape[-1]))
+        
+        scores, index = torch.topk(scores.flatten(1), max_det, axis=-1)
+        labels = index % nc
+        index = index // nc
+        boxes = boxes.gather(dim=1, index=index.unsqueeze(-1).repeat(1, 1, boxes.shape[-1]))
+        kpts = kpts.gather(dim=1, index=index.unsqueeze(-1).repeat(1, 1, kpts.shape[-1]))
+        
+        return torch.cat([boxes, scores.unsqueeze(-1), labels.unsqueeze(-1).to(boxes.dtype), kpts], dim=-1)
+        
+        # assert 4 + nc == preds.shape[-1]
+        # boxes, scores = preds.split([4, nc], dim=-1)
+        # max_scores = scores.amax(dim=-1)
+        # max_scores, index = torch.topk(max_scores, min(max_det, max_scores.shape[1]), axis=-1)
+        # index = index.unsqueeze(-1)
+        # boxes = torch.gather(boxes, dim=1, index=index.repeat(1, 1, boxes.shape[-1]))
+        # scores = torch.gather(scores, dim=1, index=index.repeat(1, 1, scores.shape[-1]))
+
+        # # NOTE: simplify but result slightly lower mAP
+        # # scores, labels = scores.max(dim=-1)
+        # # return torch.cat([boxes, scores.unsqueeze(-1), labels.unsqueeze(-1)], dim=-1)
+
+        # scores, index = torch.topk(scores.flatten(1), max_det, axis=-1)
+        # labels = index % nc
+        # index = index // nc
+        # boxes = boxes.gather(dim=1, index=index.unsqueeze(-1).repeat(1, 1, boxes.shape[-1]))
+
+        # return torch.cat([boxes, scores.unsqueeze(-1), labels.unsqueeze(-1).to(boxes.dtype)], dim=-1)
