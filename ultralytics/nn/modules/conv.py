@@ -17,6 +17,7 @@ __all__ = (
     "Focus",
     "GhostConv",
     "PConv",
+    "ConvDebug",
     "ChannelAttention",
     "SpatialAttention",
     "CBAM",
@@ -54,57 +55,70 @@ class Conv(nn.Module):
         """Perform transposed convolution of 2D data."""
         return self.act(self.conv(x))
 
-"""
-class PConv(nn.Module):
+
+class ConvDebug(nn.Module):
     default_act = nn.SiLU()  # default activation
 
-    def __init__(self, c, k=1, n_div: int=4, p=None, g=1, d=1, act=True):
+    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, d=1, act=True):
+        """Initialize Conv layer with given arguments including activation."""
         super().__init__()
-        assert(k%2==1 and c>4)
-        p = k//2
-        self.dim_conv = c // n_div
-        self.dim_rest = c - self.dim_conv
-        self.conv = nn.Conv2d(self.dim_conv, self.dim_conv, k, 1, autopad(k, p, d), groups=g, dilation=d, bias=False)
-        self.bn = nn.BatchNorm2d(c)
+        self.conv = nn.Conv2d(c1, c2, k, s, autopad(k, p, d), groups=g, dilation=d, bias=False)
+        self.bn = nn.BatchNorm2d(c2)
         self.act = self.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()
+        print(k,s,p)
 
     def forward(self, x):
-        x[:, :self.dim_conv, :, :] = self.conv(x[:, :self.dim_conv, :, :])
+        print(x.shape)
+        x=self.conv(x)
+        print(x.shape)
+        """Apply convolution, batch normalization and activation to input tensor."""
         return self.act(self.bn(x))
 
     def forward_fuse(self, x):
-        x[:, :self.dim_conv, :, :] = self.conv(x[:, :self.dim_conv, :, :])
-        return self.act(x)
+        """Perform transposed convolution of 2D data."""
+        return self.act(self.conv(x))
 
-"""
 class PConv(nn.Module):
-    """Partial convolution with args(ch_in, ch_out, kernel, stride, padding, groups, dilation, activation)."""
+    """Partial convolution with args(ch_in, ch_out, kernel, conv_ch:input_ch, padding, groups, dilation, activation)."""
     default_act = nn.SiLU()  # default activation
 
-    def __init__(self, c1, c2, k=1, n_div=4, p=None, g=1, d=1, act=True):
+    def __init__(self, c1, c2, k=1, s=1 ,p=None, n_div=4, g=1, d=1, act=True):
         """Initialize Conv layer with given arguments including activation."""
         super().__init__()
         assert(k%2==1 and c1>4)
-        p = k//2
+        self.knl_size = k
+        self.stride = s
+        self.paddling = autopad(k, p, d)
+
         self.in_dim_conv = c1 // n_div
         self.dim_rest = c1 - self.in_dim_conv
         self.out_dim_conv = c2 - self.dim_rest
-        self.conv = nn.Conv2d(self.in_dim_conv, self.out_dim_conv, k, 1, autopad(k, p, d), groups=g, dilation=d, bias=False)
+        self.conv = nn.Conv2d(self.in_dim_conv, self.out_dim_conv, k, s, self.paddling, groups=g, dilation=d, bias=False)
         self.bn = nn.BatchNorm2d(c2)
         self.act = self.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()
 
     def forward(self, x):
+        #输出尺寸=(输入尺寸-filter尺寸+2*padding)/stride+1
+        ipt_size = list(x.shape)[-1]
+        opt_size = (ipt_size-self.knl_size+2*self.paddling)//self.stride +1
+        d_size = ipt_size-opt_size
+
         x, x2 = torch.split(x, [self.in_dim_conv, self.dim_rest], dim=1)
         x = self.conv(x)
+        x2 = x2[:,:,d_size:,d_size:]
         x = torch.cat((x, x2), dim=1)
         """Apply convolution, batch normalization and activation to input tensor."""
         return self.act(self.bn(x))
 
     def forward_fuse(self, x):
+        ipt_size = list(x.shape)[-1]
+        opt_size = (ipt_size-self.knl_size+2*self.paddling)//self.stride +1
+        d_size = ipt_size-opt_size
+
         x, x2 = torch.split(x, [self.in_dim_conv, self.dim_rest], dim=1)
         x = self.conv(x)
+        x2 = x2[:,:,d_size:,d_size:]
         x = torch.cat((x, x2), dim=1)
-        """Perform transposed convolution of 2D data."""
         return self.act(x)
 
 class Conv2(Conv):
