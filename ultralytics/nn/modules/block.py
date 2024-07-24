@@ -20,6 +20,7 @@ __all__ = (
     "C2",
     "C3",
     "C2f",
+    "C2fGhost",
     "C2fAttn",
     "ImagePoolingAttn",
     "ContrastiveHead",
@@ -245,6 +246,18 @@ class C2f(nn.Module):
         y.extend(m(y[-1]) for m in self.m)
         return self.cv2(torch.cat(y, 1))
 
+class C2fGhost(C2f):
+    """Change conventional convolutions in C2f with Ghost convolution"""
+
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.c = int(c2 * e)  # hidden channels
+        self.cv1 = GhostConv(c1, 2 * self.c, 1, 1)
+        self.cv2 = GhostConv((2 + n) * self.c, c2, 1)  # optional act=FReLU(c2)
+        c_ = int(c2 * e)  # hidden channels
+        """Initialize C2fGhost module with GhostBottleneck().
+        """
+        self.m = nn.Sequential(*(GhostBottleneck(c_, c_) for _ in range(n)))
 
 class C3(nn.Module):
     """CSP Bottleneck with 3 convolutions."""
