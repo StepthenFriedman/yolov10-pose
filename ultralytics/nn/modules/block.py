@@ -47,6 +47,7 @@ __all__ = (
     "Attention",
     "PSA",
     "SCDown",
+    "SCDownGhost",
 )
 
 
@@ -966,4 +967,13 @@ class SCDown(nn.Module):
         Returns:
             (torch.Tensor): Output tensor after applying the SCDown module.
         """
+        return self.cv2(self.cv1(x))
+
+class SCDownGhost(nn.Module):
+    def __init__(self, c1, c2, k, s):
+        super().__init__()
+        self.cv1 = GhostConv(c1, c2, 1, 1)
+        self.cv2 = Conv(c2, c2, k=k, s=s, g=c2, act=False)
+
+    def forward(self, x):
         return self.cv2(self.cv1(x))
