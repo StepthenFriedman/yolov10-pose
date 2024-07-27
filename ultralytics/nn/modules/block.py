@@ -43,6 +43,7 @@ __all__ = (
     "CBLinear",
     "RepVGGDW",
     "CIB",
+    "CIBGhost",
     "C2fCIB",
     "Attention",
     "PSA",
@@ -820,6 +821,44 @@ class CIB(nn.Module):
             (torch.Tensor): Output tensor.
         """
         return x + self.cv1(x) if self.add else self.cv1(x)
+    
+class CIBGhost(nn.Module):
+    """
+    Conditional Identity Block (CIB) module.
+
+    Args:
+        c1 (int): Number of input channels.
+        c2 (int): Number of output channels.
+        shortcut (bool, optional): Whether to add a shortcut connection. Defaults to True.
+        e (float, optional): Scaling factor for the hidden channels. Defaults to 0.5.
+        lk (bool, optional): Whether to use RepVGGDW for the third convolutional layer. Defaults to False.
+    """
+
+    def __init__(self, c1, c2, shortcut=True, e=0.5, lk=False):
+        """Initializes the custom model with optional shortcut, scaling factor, and RepVGGDW layer."""
+        super().__init__()
+        c_ = int(c2 * e)  # hidden channels
+        self.cv1 = nn.Sequential(
+            Conv(c1, c1, 3, g=c1),
+            GhostConv(c1, 2 * c_, 1),
+            RepVGGDW(2 * c_) if lk else Conv(2 * c_, 2 * c_, 3, g=2 * c_),
+            GhostConv(2 * c_, c2, 1),
+            Conv(c2, c2, 3, g=c2),
+        )
+
+        self.add = shortcut and c1 == c2
+
+    def forward(self, x):
+        """
+        Forward pass of the CIB module.
+
+        Args:
+            x (torch.Tensor): Input tensor.
+
+        Returns:
+            (torch.Tensor): Output tensor.
+        """
+        return x + self.cv1(x) if self.add else self.cv1(x)
 
 
 class C2fCIB(C2f):
@@ -841,6 +880,24 @@ class C2fCIB(C2f):
         super().__init__(c1, c2, n, shortcut, g, e)
         self.m = nn.ModuleList(CIB(self.c, self.c, shortcut, e=1.0, lk=lk) for _ in range(n))
 
+class C2fCIBGhost(C2fGhost):
+    """
+    C2fCIB class represents a convolutional block with C2f and CIB modules.
+
+    Args:
+        c1 (int): Number of input channels.
+        c2 (int): Number of output channels.
+        n (int, optional): Number of CIB modules to stack. Defaults to 1.
+        shortcut (bool, optional): Whether to use shortcut connection. Defaults to False.
+        lk (bool, optional): Whether to use local key connection. Defaults to False.
+        g (int, optional): Number of groups for grouped convolution. Defaults to 1.
+        e (float, optional): Expansion ratio for CIB modules. Defaults to 0.5.
+    """
+
+    def __init__(self, c1, c2, n=1, shortcut=False, lk=False, g=1, e=0.5):
+        """Initializes the module with specified parameters for channel, shortcut, local key, groups, and expansion."""
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(CIBGhost(self.c, self.c, shortcut, e=1.0, lk=lk) for _ in range(n))
 
 class Attention(nn.Module):
     """
@@ -972,8 +1029,124 @@ class SCDown(nn.Module):
 class SCDownGhost(nn.Module):
     def __init__(self, c1, c2, k, s):
         super().__init__()
+<<<<<<< Updated upstream
         self.cv1 = GhostConv(c1, c2, 1, 1)
         self.cv2 = Conv(c2, c2, k=k, s=s, g=c2, act=False)
 
     def forward(self, x):
         return self.cv2(self.cv1(x))
+=======
+        self.cv1 = Conv(c1, c2, 1, 1)
+        self.cv2 = GhostConv(c2, c2, k=k, s=s, act=False)
+
+    def forward(self, x):
+        return self.cv2(self.cv1(x))
+    
+class ShuffleV2Block(nn.Module):
+    def __init__(self, inp, oup, mid_channels, *, ksize, stride):
+        super(ShuffleV2Block, self).__init__()
+        self.stride = stride
+        assert stride in [1, 2]
+
+        self.mid_channels = mid_channels
+        self.ksize = ksize
+        pad = ksize // 2
+        self.pad = pad
+        self.inp = inp
+
+        outputs = oup - inp
+
+        branch_main = [
+            # pw
+            nn.Conv2d(inp, mid_channels, 1, 1, 0, bias=False),
+            nn.BatchNorm2d(mid_channels),
+            nn.ReLU(inplace=True),
+            # dw
+            nn.Conv2d(mid_channels, mid_channels, ksize, stride, pad, groups=mid_channels, bias=False),
+            nn.BatchNorm2d(mid_channels),
+            # pw-linear
+            nn.Conv2d(mid_channels, outputs, 1, 1, 0, bias=False),
+            nn.BatchNorm2d(outputs),
+            nn.ReLU(inplace=True),
+        ]
+        self.branch_main = nn.Sequential(*branch_main)
+
+        if stride == 2:
+            branch_proj = [
+                # dw
+                nn.Conv2d(inp, inp, ksize, stride, pad, groups=inp, bias=False),
+                nn.BatchNorm2d(inp),
+                # pw-linear
+                nn.Conv2d(inp, inp, 1, 1, 0, bias=False),
+                nn.BatchNorm2d(inp),
+                nn.ReLU(inplace=True),
+            ]
+            self.branch_proj = nn.Sequential(*branch_proj)
+        else:
+            self.branch_proj = None
+
+    def channel_shuffle(self, x):
+        batchsize, num_channels, height, width = x.data.size()
+        assert (num_channels % 4 == 0)
+        x = x.reshape(batchsize * num_channels // 2, 2, height * width)
+        x = x.permute(1, 0, 2)
+        # 2, batchsize * num_channels // 2, height * width
+        x = x.reshape(2, -1, num_channels // 2, height, width)
+        # 2, batchsize, num_channels // 2, height, width
+        return x[0], x[1]
+    
+    def forward(self, old_x):
+        if self.stride==1:
+            x_proj, x = self.channel_shuffle(old_x)
+            return torch.cat((x_proj, self.branch_main(x)), 1)
+        elif self.stride==2:
+            x_proj = old_x
+            x = old_x
+            return torch.cat((self.branch_proj(x_proj), self.branch_main(x)), 1)
+        
+class ShuffleNetV2(nn.Module):
+    def __init__(self, stage_repeats, stage_out_channels, load_param):
+        super(ShuffleNetV2, self).__init__()
+
+        self.stage_repeats = stage_repeats
+        self.stage_out_channels = stage_out_channels
+
+        # building first layer
+        input_channel = self.stage_out_channels[1]
+        self.first_conv = nn.Sequential(
+            nn.Conv2d(3, input_channel, 3, 2, 1, bias=False),
+            nn.BatchNorm2d(input_channel),
+            nn.ReLU(inplace=True),
+        )
+
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+
+        stage_names = ["stage2", "stage3", "stage4"]
+        for idxstage in range(len(self.stage_repeats)):
+            numrepeat = self.stage_repeats[idxstage]
+            output_channel = self.stage_out_channels[idxstage+2]
+            stageSeq = []
+            for i in range(numrepeat):
+                if i == 0:
+                    stageSeq.append(ShuffleV2Block(input_channel, output_channel, 
+                                                mid_channels=output_channel // 2, ksize=3, stride=2))
+                else:
+                    stageSeq.append(ShuffleV2Block(input_channel // 2, output_channel, 
+                                                mid_channels=output_channel // 2, ksize=3, stride=1))
+                input_channel = output_channel
+            setattr(self, stage_names[idxstage], nn.Sequential(*stageSeq))
+        
+        if load_param == False:
+            self._initialize_weights()
+        else:
+            print("load param...")
+
+    def forward(self, x):
+        x = self.first_conv(x)
+        x = self.maxpool(x)
+        P1 = self.stage2(x)
+        P2 = self.stage3(P1)
+        P3 = self.stage4(P2)
+
+        return P1, P2, P3
+>>>>>>> Stashed changes

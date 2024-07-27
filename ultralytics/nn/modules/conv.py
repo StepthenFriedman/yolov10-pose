@@ -98,6 +98,7 @@ class PConv(nn.Module):
         self.act = self.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()
 
     def forward(self, x):
+<<<<<<< Updated upstream
         #输出尺寸=(输入尺寸-filter尺寸+2*padding)/stride+1
         ipt_size = list(x.shape)[-1]
         opt_size = (ipt_size-self.knl_size+2*self.paddling)//self.stride +1
@@ -108,6 +109,24 @@ class PConv(nn.Module):
         x2 = x2[:,:,d_size:,d_size:]
         x = torch.cat((x, x2), dim=1)
         """Apply convolution, batch normalization and activation to input tensor."""
+=======
+        #print(x.shape)
+        #输出尺寸=(输入尺寸-filter尺寸+2*padding)/stride+1
+        shape = list(x.shape)
+        ipt_size_y = shape[-2]
+        opt_size_y = (ipt_size_y-self.knl_size+2*self.paddling)//self.stride +1
+        ipt_size_x = shape[-1]
+        opt_size_x = (ipt_size_x-self.knl_size+2*self.paddling)//self.stride +1
+        d_size_y = ipt_size_y-opt_size_y
+        d_size_x = ipt_size_x-opt_size_x
+
+        x, x2 = torch.split(x, [self.in_dim_conv, self.dim_rest], dim=1)
+        x = self.conv(x)
+        x2 = x2[:,:,d_size_y:,d_size_x:]
+        x = torch.cat((x, x2), dim=1)
+        """Apply convolution, batch normalization and activation to input tensor."""
+        #print(x.shape)
+>>>>>>> Stashed changes
         return self.act(self.bn(x))
 
     def forward_fuse(self, x):
