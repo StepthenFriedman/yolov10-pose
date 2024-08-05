@@ -407,6 +407,12 @@ class SegmentationModel(DetectionModel):
         """Initialize the loss criterion for the SegmentationModel."""
         return v8SegmentationLoss(self)
 
+class MemoryModel(DetectionModel):
+    """YOLOv8 Oriented Bounding Box (OBB) model."""
+
+    def __init__(self, cfg="yolov8n-memory.yaml", ch=3, nc=None, verbose=True):
+        """Initialize YOLOv8 OBB model with given config and parameters."""
+        super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose)
 
 class PoseModel(DetectionModel):
     """YOLOv8 pose model."""
@@ -1067,6 +1073,8 @@ def guess_model_task(model):
             return "pose"
         if m == "obb":
             return "obb"
+        if m == "memory":
+            return "memory"
 
     # Guess from model cfg
     if isinstance(model, dict):
@@ -1105,8 +1113,10 @@ def guess_model_task(model):
             return "pose"
         elif "-obb" in model.stem or "obb" in model.parts:
             return "obb"
-        elif "detect" in model.parts:
+        elif "memory" in model.parts:
             return "detect"
+        elif "-memory" in model.parts:
+            return "memory"
 
     # Unable to determine task from model
     LOGGER.warning(
